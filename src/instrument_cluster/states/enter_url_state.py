@@ -45,22 +45,12 @@ class EnterURLState(State):
         surf = pygame.display.get_surface()
         self._w, self._h = surf.get_width(), surf.get_height()
 
-        # Title
         self.title_label = Label(
             text="Install Proxy Tarball",
-            font=load_font(size=52, dir="pixeltype", name=FontFamily.PIXEL_TYPE),
+            font=load_font(size=64, dir="pixeltype", name=FontFamily.PIXEL_TYPE),
             color=Color.BLUE.rgb(),
-            pos=(self._w // 2, 60),
-            center=True,
-        )
-
-        # Hint
-        self.hint_label = Label(
-            text="Tarball URL:",
-            font=load_font(size=32, dir="pixeltype", name=FontFamily.PIXEL_TYPE),
-            color=Color.WHITE.rgb(),
-            pos=(self._w // 2, 120),
-            center=True,
+            pos=(48, 38),
+            center=False,
         )
 
         # Text input
@@ -68,13 +58,12 @@ class EnterURLState(State):
             text=DEFAULT_TARBALL_URL,
             font=load_font(size=24, dir="pixeltype", name=FontFamily.PIXEL_TYPE),
             color=Color.WHITE.rgb(),
-            pos=(self._w // 2 - 420, self._h // 2 - 30),
+            pos=(self._w // 2 - 420, self._h // 4),
             width=840,
             height=60,
             border_color=Color.GREY.rgb(),
         )
 
-        # Buttons (use VALID event types; no None)
         self.download_button = Button(
             rect=(self._w // 2 - 220, self._h - 120, 200, 70),
             text="Download",
@@ -99,11 +88,9 @@ class EnterURLState(State):
         self.btns.add(self.cancel_button)
 
     def handle_event(self, event) -> bool:
-        # Let widgets generate their pressed/released events
         self.btns.handle_event(event)
         self.textfield.handle_event(event)
 
-        # Cancel → back to settings
         if event.type == BACK_TO_MENU_RELEASED:
             from .settings_state import SettingsState
 
@@ -153,7 +140,7 @@ class EnterURLState(State):
             self._status = None
             return
 
-        # Success → set mode to UDP and go back to Settings
+        # Success -> set mode to UDP and go back to Settings
         ConfigManager.set_telemetry_mode(TelemetryMode.UDP)
         self._status = f"Installed. Proxy status: {service_status()}"
 
@@ -168,7 +155,6 @@ class EnterURLState(State):
     def draw(self, surface):
         surface.fill(Color.BLACK.rgb())
         self.title_label.draw(surface)
-        self.hint_label.draw(surface)
 
         self.textfield.draw(surface)
         self.btns.draw(surface)

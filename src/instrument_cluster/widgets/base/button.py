@@ -3,8 +3,7 @@ from typing import Literal, Optional, Tuple
 
 import pygame
 
-from gt7_simdash.core.utils import FontFamily, load_font
-
+from ...core.utils import FontFamily, load_font
 from ..base.colors import Color
 
 """Lightweight button widgets for Pygame with text+icon layout.
