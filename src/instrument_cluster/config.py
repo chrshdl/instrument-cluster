@@ -6,7 +6,7 @@ from typing import Optional
 from .core.logger import Logger
 from .telemetry.mode import TelemetryMode
 
-LOGGER = Logger("configs.py").get()
+LOGGER = Logger("config.py").get()
 
 
 @dataclass

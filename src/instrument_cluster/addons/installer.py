@@ -1,192 +1,203 @@
+from __future__ import annotations
+
+"""
+Preinstalled-unit variant of the granturismo proxy installer.
+
+Safe on systems WITHOUT systemd (e.g. macOS):
+- service_status() returns "unavailable" instead of raising.
+- start/stop/restart return ok=False with a clear message.
+- install_from_url() still downloads/extracts and writes /etc/default/simdash-proxy;
+  if systemctl is missing, it returns ok=True (install succeeded) and leaves a
+  message indicating that service control is unavailable on this OS.
+"""
+
 import hashlib
 import os
 import shutil
-import socket
 import subprocess
 import tarfile
 import tempfile
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
-ADDONS_DIR = Path("/data/addons")
-PROXY_DIR = Path("/opt/proxy/granturismo")
-SYSTEMD_UNIT_PATH = Path("/etc/systemd/system/simdash-proxy@granturismo.service")
+# -------- systemctl detection (works on Linux and no-ops on macOS) --------
+
+
+def _find_systemctl() -> Optional[str]:
+    # Prefer typical absolute paths, then $PATH
+    for cand in ("/bin/systemctl", "/usr/bin/systemctl"):
+        if Path(cand).exists():
+            return cand
+    found = shutil.which("systemctl")
+    return found
+
+
+SYSTEMCTL: Optional[str] = _find_systemctl()
+
+DEST = Path("/opt/granturismo")
+ENV_FILE = Path("/etc/default/simdash-proxy")
+UNIT_NAME = "simdash-proxy.service"
+DEFAULT_OUTPUT = "udp://127.0.0.1:5600"
+
+# For convenience: default release URL, can be overridden in UI
+DEFAULT_TARBALL_URL = (
+    "https://github.com/chrshdl/granturismo/releases/download/v0.3.0/"
+    "granturismo-selfcontained-0.3.0.tar.gz"
+)
 
 
 @dataclass
 class InstallResult:
     ok: bool
-    message: str
+    message: str = ""
 
 
-def _ensure_dirs() -> None:
-    ADDONS_DIR.mkdir(parents=True, exist_ok=True)
-    PROXY_DIR.mkdir(parents=True, exist_ok=True)
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
 
 
-def _download(url: str, dest: Path) -> None:
-    with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
-        shutil.copyfileobj(resp, f)
+def _tool_exists(name: str) -> bool:
+    return shutil.which(name) is not None
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _write(path: Path, content: str, mode: int = 0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, mode)
 
 
-def _extract_tgz(tgz_path: Path, target_dir: Path) -> None:
-    with tarfile.open(tgz_path, "r:*") as tf:
-        tf.extractall(target_dir)
+def is_installed() -> bool:
+    """Return True if the extracted bundle exists under /opt/granturismo."""
+    return (DEST / "granturismo" / "proxy.py").exists() and (DEST / "vendor").exists()
 
 
-def _find_proxy_exec(base: Path) -> Optional[Path]:
+def service_status() -> str:
     """
-    Expect convention:
-      /opt/proxy/granturismo/bin/proxy  (executable)
-    If a versioned folder exists, allow /opt/proxy/granturismo/<ver>/bin/proxy
+    Return 'active', 'inactive', 'failed', etc., for the preinstalled unit.
+    On systems without systemctl (e.g. macOS), return 'unavailable'.
     """
-    cand = base / "bin" / "proxy"
-    if cand.exists() and os.access(cand, os.X_OK):
-        return cand
-    # search one level deep
-    for sub in base.iterdir():
-        if sub.is_dir():
-            cand2 = sub / "bin" / "proxy"
-            if cand2.exists() and os.access(cand2, os.X_OK):
-                return cand2
-    return None
-
-
-def _write_systemd_unit(exec_path: Path) -> None:
-    unit = f"""[Unit]
-Description=SimDash Telemetry Proxy (granturismo) for PS5 %i
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=proxy
-Group=proxy
-ExecStart={exec_path} --ps5-ip %i --out-host 127.0.0.1 --out-port 5600
-Restart=on-failure
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/simdash-proxy
-CapabilityBoundingSet=
-AmbientCapabilities=
-
-[Install]
-WantedBy=multi-user.target
-"""
-    SYSTEMD_UNIT_PATH.write_text(unit)
-
-
-def _systemctl(*args: str) -> Tuple[bool, str]:
+    if SYSTEMCTL is None:
+        return "unavailable"
     try:
-        out = subprocess.check_output(
-            ["/bin/systemctl", *args], stderr=subprocess.STDOUT, text=True
-        )
-        return True, out.strip()
+        cp = _run([SYSTEMCTL, "is-active", UNIT_NAME])
+        return cp.stdout.strip()
     except subprocess.CalledProcessError as e:
-        return False, e.output.strip()
+        # systemd returns non-zero for inactive/failed; capture text safely
+        return (e.stdout or "inactive").strip()
 
 
-def _require_root() -> Optional[str]:
+def start_service() -> InstallResult:
+    if SYSTEMCTL is None:
+        return InstallResult(False, "systemctl not available on this OS")
     try:
-        return None if os.geteuid() == 0 else "Installer needs root privileges."
-    except AttributeError:
-        # Windows (not relevant on Pi), assume ok
-        return None
+        _run([SYSTEMCTL, "daemon-reload"])
+        _run([SYSTEMCTL, "enable", "--now", UNIT_NAME])
+        return InstallResult(True, f"Started {UNIT_NAME}")
+    except subprocess.CalledProcessError as e:
+        return InstallResult(False, e.stdout)
 
 
-def _ensure_proxy_user() -> None:
-    # create 'proxy' user/group if missing
-    subprocess.call(
-        ["/usr/sbin/groupadd", "-r", "proxy"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    subprocess.call(
-        ["/usr/sbin/useradd", "-r", "-s", "/usr/sbin/nologin", "-g", "proxy", "proxy"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    Path("/var/lib/simdash-proxy").mkdir(parents=True, exist_ok=True)
+def restart_service() -> InstallResult:
+    if SYSTEMCTL is None:
+        return InstallResult(False, "systemctl not available on this OS")
     try:
-        subprocess.call(
-            ["/bin/chown", "-R", "proxy:proxy", "/var/lib/simdash-proxy"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
+        _run([SYSTEMCTL, "restart", UNIT_NAME])
+        return InstallResult(True, f"Restarted {UNIT_NAME}")
+    except subprocess.CalledProcessError as e:
+        return InstallResult(False, e.stdout)
+
+
+def stop_service() -> InstallResult:
+    if SYSTEMCTL is None:
+        return InstallResult(False, "systemctl not available on this OS")
+    try:
+        _run([SYSTEMCTL, "disable", "--now", UNIT_NAME])
+        return InstallResult(True, f"Stopped {UNIT_NAME}")
+    except subprocess.CalledProcessError as e:
+        return InstallResult(False, e.stdout)
 
 
 def install_from_url(
-    url: str, ps5_ip: str, sha256: Optional[str] = None
+    url: str,
+    ps_ip: str,
+    sha256: Optional[str] = None,
+    jsonl_output: Optional[str] = None,
 ) -> InstallResult:
-    # Basic IP sanity
+    """
+    Download & install the third-party granturismo bundle into /opt/granturismo,
+    write /etc/default/simdash-proxy, and enable+start the preinstalled unit.
+    If systemctl is not available (e.g., macOS), the install still completes
+    and returns ok=True with a note that service control is unavailable.
+    """
+    if not ps_ip:
+        return InstallResult(False, "PS5 IP missing")
+
+    if not _tool_exists("curl") and not _tool_exists("wget"):
+        return InstallResult(False, "Need curl or wget to download the tarball")
+
+    DEST.mkdir(parents=True, exist_ok=True)
+
+    # 1) Download to a temp file
+    tmp = Path(tempfile.mkstemp(prefix="granturismo-", suffix=".tar.gz")[1])
     try:
-        socket.inet_aton(ps5_ip)
-    except OSError:
-        return InstallResult(False, f"Invalid PS5 IP: {ps5_ip}")
-
-    need_root = _require_root()
-    if need_root:
-        return InstallResult(False, need_root)
-
-    _ensure_dirs()
-
-    # download to /data/addons/granturismo-<ts>.tgz
-    with tempfile.TemporaryDirectory(dir=str(ADDONS_DIR)) as tmpd:
-        tmp = Path(tmpd)
-        tgz_path = tmp / "proxy.tgz"
         try:
-            _download(url, tgz_path)
-        except Exception as e:
-            return InstallResult(False, f"Download failed: {e}")
+            if _tool_exists("curl"):
+                _run(["curl", "-L", "-o", str(tmp), url])
+            else:
+                _run(["wget", "-O", str(tmp), url])
+        except subprocess.CalledProcessError as e:
+            return InstallResult(False, e.stdout or "Download failed")
 
+        # 2) Optional integrity check
         if sha256:
-            calc = _sha256(tgz_path)
-            if calc.lower() != sha256.lower():
-                return InstallResult(
-                    False, f"SHA256 mismatch:\n expected {sha256}\n   actual {calc}"
-                )
+            h = hashlib.sha256()
+            with tmp.open("rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            if h.hexdigest().lower() != sha256.lower():
+                return InstallResult(False, "SHA256 mismatch; aborting")
 
-        # extract into /opt/proxy/granturismo (clean old)
+        # 3) Extract to /opt/granturismo (idempotent over existing)
         try:
-            if PROXY_DIR.exists():
-                # keep a backup if you want; for now replace
-                shutil.rmtree(PROXY_DIR)
-            PROXY_DIR.mkdir(parents=True, exist_ok=True)
-            _extract_tgz(tgz_path, PROXY_DIR)
+            with tarfile.open(tmp, "r:gz") as tf:
+                tf.extractall(DEST)
         except Exception as e:
-            return InstallResult(False, f"Extract failed: {e}")
+            return InstallResult(False, f"Extraction failed: {e}")
 
-    exec_path = _find_proxy_exec(PROXY_DIR)
-    if not exec_path:
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # 4) /etc/default/simdash-proxy with PS IP and output
+    output = jsonl_output or DEFAULT_OUTPUT
+    env_content = f"GT_PS_IP={ps_ip}\nGT_JSONL_OUTPUT={output}\n"
+    try:
+        _write(ENV_FILE, env_content, 0o644)
+    except Exception as e:
+        return InstallResult(False, f"Failed to write {ENV_FILE}: {e}")
+
+    # 5) Enable + start the service (if available)
+    if SYSTEMCTL is None:
+        # On macOS/CI: installation is still successful; just can't manage service here.
         return InstallResult(
-            False, "proxy executable not found under /opt/proxy/granturismo/bin/proxy"
+            True,
+            "Installed bundle; service control unavailable on this OS (no systemctl).",
         )
 
-    # systemd bits
     try:
-        _ensure_proxy_user()
-        _write_systemd_unit(exec_path)
-        _systemctl("daemon-reload")
-        ok, out = _systemctl("enable", f"simdash-proxy@{ps5_ip}.service")
-        if not ok:
-            return InstallResult(False, f"systemctl enable failed: {out}")
-        ok, out = _systemctl("restart", f"simdash-proxy@{ps5_ip}.service")
-        if not ok:
-            return InstallResult(False, f"systemctl start failed: {out}")
-    except Exception as e:
-        return InstallResult(False, f"systemd setup failed: {e}")
+        _run([SYSTEMCTL, "daemon-reload"])
+        _run([SYSTEMCTL, "enable", "--now", UNIT_NAME])
+    except subprocess.CalledProcessError as e:
+        return InstallResult(False, e.stdout or "Failed to enable/start service")
 
-    return InstallResult(True, f"Installed and started proxy for {ps5_ip}")
+    st = service_status()
+    return InstallResult(True, f"Installed bundle, service: {st}")

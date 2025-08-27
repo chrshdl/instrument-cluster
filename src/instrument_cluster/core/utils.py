@@ -6,7 +6,7 @@ import pygame
 
 def load_font(size: int, dir: str = None, name: str = None):
     p = f"assets/fonts/{dir}/{name}.ttf" if dir else f"assets/fonts/{name}.ttf"
-    font_res = files("gt7_simdash").joinpath(p)
+    font_res = files("instrument_cluster").joinpath(p)
     with as_file(font_res) as font_path:
         return pygame.font.Font(str(font_path), size)
 

@@ -1,7 +1,10 @@
-from typing import TYPE_CHECKING, Iterable
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 import pygame
 
+from ..config import ConfigManager
 from ..core.events import (
     BACK_TO_MENU_PRESSED,
     BACK_TO_MENU_RELEASED,
@@ -14,15 +17,16 @@ from ..core.events import (
 )
 from ..core.ipv4 import get_ip_prefill
 from ..core.utils import FontFamily, load_font
-from .state import State
-
-if TYPE_CHECKING:
-    pass
-
 from ..widgets.base.button import Button, ButtonGroup
 from ..widgets.base.colors import Color
 from ..widgets.base.label import Label
 from ..widgets.base.textfield import TextField
+from .enter_url_state import EnterURLState
+from .settings_state import SettingsState
+from .state import State
+
+if TYPE_CHECKING:
+    pass
 
 BUTTONS_PER_ROW = 3
 BUTTON_DIMENSIONS = (114, 74)
@@ -32,7 +36,6 @@ BUTTON_GRID_OFFSET = (
     BUTTON_DIMENSIONS[1] + BUTTON_MARGIN,
 )
 NUMPAD_OFFSET = (62, 228)
-
 
 RECENT_BUTTONS_PER_ROW = 1
 RECENT_BUTTONS_DIMENSIONS = (260, 70)
@@ -45,10 +48,16 @@ RECENT_BUTTONS_OFFSET = (680, 210)
 
 
 class EnterIPState(State):
-    def __init__(self, state_manager=None, recent_connected: list[str] = None):
+    def __init__(
+        self,
+        state_manager=None,
+        recent_connected: list[str] | None = None,
+        on_submit: Optional[Callable[[str], None]] = None,  # kept for compatibility
+    ):
         super().__init__()
         self.state_manager = state_manager
-        self.input_text = ""
+        self._on_submit = on_submit
+        recent_connected = recent_connected or []
         self.button_group: ButtonGroup = ButtonGroup()
         labels = list("123456789#0.")
 
@@ -61,12 +70,6 @@ class EnterIPState(State):
             event_type_released=BACK_TO_MENU_RELEASED,
             font=load_font(50, name=FontFamily.PIXEL_TYPE),
             antialias=True,
-            # icon="\ue166",
-            # icon_size=46,
-            # icon_position="center",
-            # icon_gap=0,
-            # padding=(0, 0),
-            # icon_cell_width=36,
         )
         del_button = Button(
             rect=(416, 142, 100, 76),
@@ -177,17 +180,40 @@ class EnterIPState(State):
             self.on_ok_released()
 
     def on_back_released(self, event):
-        from .main_menu_state import MainMenuState
+        # Return to Settings
+        from .settings_state import SettingsState
 
-        self.state_manager.change_state(MainMenuState(self.state_manager))
+        self.state_manager.change_state(SettingsState(self.state_manager))
 
     def on_ok_released(self):
         ip = self.textfield.text.strip()
-        if self.is_valid_ipv4(ip):
-            from .connecting_state import ConnectingState
+        if not self.is_valid_ipv4(ip):
+            return  # ignore invalid; the keypad view remains visible
 
-            next_state = ConnectingState(self.state_manager, ip)
-            self.state_manager.change_state(next_state)
+        # Persist IP in config
+        cfg = ConfigManager.get_config()
+        setattr(cfg, "playstation_ip", ip)
+        try:
+            setter = getattr(ConfigManager, "set_playstation_ip", None)
+            if callable(setter):
+                setter(ip)
+            else:
+                ConfigManager.save_config(cfg)
+        except Exception:
+            # best-effort persistence
+            pass
+
+        # If a custom callback was provided elsewhere, allow it (back-compat)
+        if self._on_submit is not None:
+            try:
+                self._on_submit(ip)
+            finally:
+                # go back to previous state
+                self.state_manager.change_state(SettingsState(self.state_manager))
+            return
+
+        # Next: open the URL input state to install the proxy tarball
+        self.state_manager.change_state(EnterURLState(self.state_manager))
 
     def on_keypad_released(self, event):
         label = getattr(event, "label", None)
@@ -220,7 +246,10 @@ class EnterIPState(State):
                 return False
             if len(part) > 1 and part.startswith("0"):
                 return False
-            num = int(part)
+            try:
+                num = int(part)
+            except ValueError:
+                return False
             if num < 0 or num > 255:
                 return False
         return True
@@ -255,5 +284,5 @@ class EnterIPState(State):
                 ),
                 antialias=True,
             )
-            for i, val in enumerate(labels)
+            for i, val in enumerate(labels or [])
         ]
